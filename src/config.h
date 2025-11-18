@@ -17,7 +17,7 @@
 #define MAX_QUEUE 256                        // 任务队列最大长度
 
 // 服务器配置
-#define DEFAULT_PORT 8080                    // 默认端口
+#define DEFAULT_PORT 8181                    // 默认端口
 #define DEFAULT_DOCUMENT_ROOT "./www"        // 默认文档根目录
 #define DEFAULT_CACHE_ALGORITHM LRU         // 默认缓存算法
 
@@ -29,5 +29,18 @@ typedef enum {
 
 // 性能监控配置
 #define STATS_UPDATE_INTERVAL 5              // 统计信息更新间隔(秒)
+
+// 日志配置
+#define LOG_ENABLED 1                        // 启用日志
+#define LOG_LEVEL 3                          // 日志级别: 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG
+#define LOG_FILE "webserver.log"             // 日志文件路径
+
+// 日志级别枚举
+typedef enum {
+    LOG_ERROR = 0,
+    LOG_WARN = 1,
+    LOG_INFO = 2,
+    LOG_DEBUG = 3
+} log_level_t;
 
 #endif

@@ -10,7 +10,7 @@
 void print_usage(const char *program_name) {
     printf("Usage: %s [options]\n", program_name);
     printf("Options:\n");
-    printf("  -p, --port PORT      Server port (default: %d)\n", DEFAULT_PORT);
+    printf("  -p, --port PORT      Server port (default: %d)\n", 8181);  // 修改为8181
     printf("  -d, --dir DIR        Document root directory (default: %s)\n", DEFAULT_DOCUMENT_ROOT);
     printf("  -a, --algorithm ALG  Cache algorithm: lru or lfu (default: %s)\n", 
            DEFAULT_CACHE_ALGORITHM == LRU ? "lru" : "lfu");
@@ -18,7 +18,7 @@ void print_usage(const char *program_name) {
 }
 
 int main(int argc, char *argv[]) {
-    int port = DEFAULT_PORT;
+    int port = 8181;  // 修改默认端口为8181
     char *document_root = DEFAULT_DOCUMENT_ROOT;
     cache_algorithm_t algorithm = DEFAULT_CACHE_ALGORITHM;
     

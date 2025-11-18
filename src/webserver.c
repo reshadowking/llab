@@ -9,18 +9,138 @@
 #include <fcntl.h>
 #include <time.h>
 #include <dirent.h>
+#include <signal.h>
+#include <sys/sendfile.h>
+#include <sys/time.h>
 
 #include "webserver.h"
 #include "cache.h"
 #include "epoll_handler.h"
 #include "threadpool.h"
-
+#include "config.h"
+#include "logging.h" 
+#include <stdarg.h>
 // 全局统计变量
 static unsigned long cache_hits = 0;
 static unsigned long total_requests = 0;
+static unsigned long sendfile_used = 0;
+static struct timeval start_time;
 
-// 修复：添加缺失的函数声明
+// 全局服务器状态变量
+static cache_t *global_cache = NULL;
+static cache_algorithm_t current_algorithm = LRU;
+static char *global_document_root = NULL;
+static int global_server_port = 0;
+
+// 函数声明
 int create_server_socket(int port);
+void send_error_response(int client_fd, int code, const char *message);
+void send_file_response(int client_fd, const char *filename, void *data, size_t size);
+void handle_client_request(void *arg);
+void start_server(int port, const char *document_root, cache_algorithm_t algorithm);
+
+
+// 日志函数
+void log_message(log_level_t level, const char *format, ...) {
+#if LOG_ENABLED
+    if (level > LOG_LEVEL) return;
+    
+    FILE *log_file = fopen(LOG_FILE, "a");
+    if (!log_file) return;
+    
+    // 获取当前时间
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    char timestamp[20];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm);
+    
+    // 日志级别字符串
+    const char *level_str;
+    switch (level) {
+        case LOG_ERROR: level_str = "ERROR"; break;
+        case LOG_WARN: level_str = "WARN"; break;
+        case LOG_INFO: level_str = "INFO"; break;
+        case LOG_DEBUG: level_str = "DEBUG"; break;
+        default: level_str = "UNKNOWN"; break;
+    }
+    
+    // 写入日志头
+    fprintf(log_file, "[%s] [%s] [PID:%d] ", timestamp, level_str, getpid());
+    
+    // 写入日志内容
+    va_list args;
+    va_start(args, format);
+    vfprintf(log_file, format, args);
+    va_end(args);
+    
+    // 换行并关闭文件
+    fprintf(log_file, "\n");
+    fclose(log_file);
+#endif
+}
+
+// 信号处理函数
+void signal_handler(int sig) {
+    printf("\n=== 服务器状态报告 ===\n");
+    printf("接收信号: %d\n", sig);
+    
+    if (sig == SIGINT || sig == SIGTERM) {
+        printf("正在关闭服务器...\n");
+        
+        // 打印最终统计信息
+        struct timeval current_time;
+        gettimeofday(&current_time, NULL);
+        
+        double uptime = (current_time.tv_sec - start_time.tv_sec) + 
+                       (current_time.tv_usec - start_time.tv_usec) / 1000000.0;
+        
+        printf("运行时间: %.2f 秒\n", uptime);
+        printf("总请求数: %lu\n", total_requests);
+        printf("缓存命中数: %lu\n", cache_hits);
+        printf("缓存命中率: %.2f%%\n", total_requests > 0 ? 
+               (double)cache_hits / total_requests * 100 : 0);
+        printf("sendfile使用次数: %lu\n", sendfile_used);
+        printf("QPS: %.2f\n", uptime > 0 ? (double)total_requests / uptime : 0);
+        
+        // 清理资源
+        if (global_cache) {
+            printf("缓存统计: 大小=%zuMB, 项目数=%u\n", 
+                   cache_get_size(global_cache) / (1024 * 1024), 
+                   cache_get_count(global_cache));
+            cache_destroy(global_cache);
+        }
+        
+        printf("服务器已关闭\n");
+        exit(0);
+    }
+    else if (sig == SIGUSR1) {
+        // 切换缓存算法
+        if (current_algorithm == LRU) {
+            current_algorithm = LFU;
+            printf("切换缓存算法为: LFU\n");
+        } else {
+            current_algorithm = LRU;
+            printf("切换缓存算法为: LRU\n");
+        }
+        
+        if (global_cache) {
+            cache_set_algorithm(global_cache, current_algorithm);
+        }
+    }
+    else if (sig == SIGUSR2) {
+        // 显示当前状态
+        printf("当前缓存算法: %s\n", current_algorithm == LRU ? "LRU" : "LFU");
+        printf("文档根目录: %s\n", global_document_root);
+        printf("服务器端口: %d\n", global_server_port);
+        
+        if (global_cache) {
+            printf("缓存状态: 大小=%zuMB/%zuMB, 项目数=%u\n", 
+                cache_get_size(global_cache) / (1024 * 1024),
+                (size_t)(MAX_CACHE_SIZE / (1024 * 1024)),  // 确保类型一致
+                cache_get_count(global_cache));
+        }
+    }
+}
 
 void send_error_response(int client_fd, int code, const char *message) {
     char response[1024];
@@ -63,6 +183,23 @@ void send_file_response(int client_fd, const char *filename, void *data, size_t 
         content_type, size, date);
     
     write(client_fd, header, header_len);
+    
+    // 使用sendfile进行零拷贝传输（如果支持）
+    #ifdef __linux__
+    // 对于大文件，使用sendfile优化
+    if (size > 4096) { // 大于4KB的文件使用sendfile
+        int file_fd = open(filename, O_RDONLY);
+        if (file_fd >= 0) {
+            off_t offset = 0;
+            sendfile(client_fd, file_fd, &offset, size);
+            close(file_fd);
+            sendfile_used++;
+            return;
+        }
+    }
+    #endif
+    
+    // 小文件或sendfile不可用时使用普通write
     write(client_fd, data, size);
 }
 
@@ -154,7 +291,7 @@ void handle_client_request(void *arg) {
                 }
             } else {
                 // 大文件直接发送
-                send_error_response(ctx->client_fd, 413, "File Too Large");
+                send_file_response(ctx->client_fd, filepath, NULL, file_stat.st_size);
             }
             close(file_fd);
         }
@@ -175,14 +312,8 @@ int create_server_socket(int port) {
         exit(EXIT_FAILURE);
     }
     
-    // 设置socket选项 - 使用条件编译处理SO_REUSEPORT
-    #ifdef SO_REUSEPORT
-        // 如果系统支持SO_REUSEPORT，同时设置SO_REUSEADDR和SO_REUSEPORT
-        if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
-    #else
-        // 如果不支持，只设置SO_REUSEADDR
-        if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-    #endif
+    // 设置socket选项
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
         perror("setsockopt");
         close(server_fd);
         exit(EXIT_FAILURE);
@@ -245,6 +376,25 @@ void start_server(int port, const char *document_root, cache_algorithm_t algorit
     printf("Document root: %s\n", document_root);
     printf("Cache algorithm: %s\n", algorithm == LRU ? "LRU" : "LFU");
     printf("Cache size: %d MB\n", MAX_CACHE_SIZE / (1024 * 1024));
+    
+    // 设置信号处理
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGUSR1, signal_handler);  // 切换缓存算法
+    signal(SIGUSR2, signal_handler);  // 显示状态
+    
+    // 保存全局状态
+    global_cache = cache;
+    current_algorithm = algorithm;
+    global_document_root = strdup(document_root);
+    global_server_port = port;
+    gettimeofday(&start_time, NULL);
+    
+    printf("信号处理已设置:\n");
+    printf("  SIGINT/SIGTERM - 优雅关闭服务器\n");
+    printf("  SIGUSR1 - 切换缓存算法 (当前: %s)\n", algorithm == LRU ? "LRU" : "LFU");
+    printf("  SIGUSR2 - 显示服务器状态\n");
+    printf("使用命令: kill -SIGUSR1 %d 切换缓存算法\n", getpid());
     
     // 进入事件循环
     epoll_handler_loop(epoll_handler);

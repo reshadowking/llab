@@ -4,13 +4,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <arpa/inet.h>      // 添加这个头文件
-#include <sys/socket.h>      // 添加这个头文件
-#include <netinet/in.h>      // 添加这个头文件
-
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
 #include "epoll_handler.h"
 #include "webserver.h"
+#include "threadpool.h"
+#include "cache.h"
+#include "logging.h"
 
 epoll_handler_t *epoll_handler_create(int server_fd, cache_t *cache, 
                                      const char *document_root, threadpool_t *pool) {
@@ -51,93 +54,93 @@ epoll_handler_t *epoll_handler_create(int server_fd, cache_t *cache,
         return NULL;
     }
     
+    log_message(LOG_INFO, "Epoll处理器创建成功，最大事件数: %d", MAX_EVENTS);
     return handler;
 }
 
-void epoll_handler_destroy(epoll_handler_t *handler) {
-    if (!handler) return;
-    
-    close(handler->epoll_fd);
-    free(handler->events);
-    free(handler->document_root);
-    free(handler);
-}
-
-int epoll_handler_add_client(epoll_handler_t *handler, int client_fd) {
-    // 设置非阻塞模式
-    int flags = fcntl(client_fd, F_GETFL, 0);
-    if (flags == -1) {
-        perror("fcntl F_GETFL");
-        return -1;
-    }
-    if (fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        perror("fcntl F_SETFL");
-        return -1;
-    }
-    
-    struct epoll_event ev;
-    ev.events = EPOLLIN | EPOLLET;  // 边缘触发模式
-    ev.data.fd = client_fd;
-    
-    if (epoll_ctl(handler->epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
-        perror("epoll_ctl: client_fd");
-        return -1;
-    }
-    
-    return 0;
-}
-
 void epoll_handler_loop(epoll_handler_t *handler) {
-    printf("Epoll event loop started...\n");
+    log_message(LOG_INFO, "Epoll事件循环开始");
     
     while (1) {
         int nfds = epoll_wait(handler->epoll_fd, handler->events, MAX_EVENTS, -1);
         if (nfds == -1) {
+            if (errno == EINTR) {
+                log_message(LOG_DEBUG, "epoll_wait被信号中断，继续循环");
+                continue;
+            }
             perror("epoll_wait");
+            log_message(LOG_ERROR, "epoll_wait错误: %s", strerror(errno));
             break;
         }
         
+        log_message(LOG_DEBUG, "epoll_wait返回 %d 个就绪事件", nfds);
+        
         for (int i = 0; i < nfds; i++) {
             if (handler->events[i].data.fd == handler->server_fd) {
-                // 新的客户端连接
-                struct sockaddr_in client_addr;
-                socklen_t addr_len = sizeof(client_addr);
-                int client_fd = accept(handler->server_fd, 
-                                     (struct sockaddr*)&client_addr, &addr_len);
-                
-                if (client_fd == -1) {
-                    perror("accept");
-                    continue;
-                }
-                
-                printf("New connection from %s:%d\n", 
-                       inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-                
-                if (epoll_handler_add_client(handler, client_fd) == -1) {
-                    close(client_fd);
-                }
+                // 处理新连接
+                handle_new_connection(handler);
             } else {
-                // 客户端数据可读
-                int client_fd = handler->events[i].data.fd;
-                
-                // 创建客户端上下文
-                client_context_t *ctx = malloc(sizeof(client_context_t));
-                if (!ctx) {
-                    close(client_fd);
-                    continue;
-                }
-                
-                ctx->client_fd = client_fd;
-                ctx->document_root = handler->document_root;
-                ctx->cache = handler->cache;
-                
-                // 添加到线程池处理
-                if (threadpool_add_task(handler->thread_pool, handle_client_request, ctx) != 0) {
-                    fprintf(stderr, "Failed to add task to thread pool\n");
-                    close(client_fd);
-                    free(ctx);
-                }
+                // 处理客户端数据
+                handle_client_data(handler, handler->events[i].data.fd);
             }
         }
+    }
+    
+    log_message(LOG_INFO, "Epoll事件循环结束");
+}
+
+static void handle_new_connection(epoll_handler_t *handler) {
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+    
+    int client_fd = accept(handler->server_fd, (struct sockaddr*)&client_addr, &addr_len);
+    if (client_fd == -1) {
+        perror("accept");
+        log_message(LOG_ERROR, "接受新连接失败");
+        return;
+    }
+    
+    // 设置非阻塞模式
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+    
+    // 添加客户端到epoll
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLET; // 边缘触发模式
+    ev.data.fd = client_fd;
+    if (epoll_ctl(handler->epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
+        perror("epoll_ctl: client_fd");
+        close(client_fd);
+        log_message(LOG_ERROR, "添加客户端到epoll失败");
+        return;
+    }
+    
+    log_message(LOG_INFO, "新连接: %s:%d", 
+                inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+}
+
+static void handle_client_data(epoll_handler_t *handler, int client_fd) {
+    // 创建客户端上下文
+    client_context_t *ctx = malloc(sizeof(client_context_t));
+    if (!ctx) {
+        log_message(LOG_ERROR, "分配客户端上下文内存失败");
+        close(client_fd);
+        return;
+    }
+    
+    ctx->client_fd = client_fd;
+    ctx->document_root = handler->document_root;
+    ctx->cache = handler->cache;
+    
+    // 从epoll中移除，交给线程池处理
+    epoll_ctl(handler->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+    
+    // 添加到线程池
+    if (threadpool_add_task(handler->thread_pool, handle_client_request, ctx) != 0) {
+        log_message(LOG_ERROR, "添加任务到线程池失败");
+        close(client_fd);
+        free(ctx);
+    } else {
+        log_message(LOG_DEBUG, "客户端任务已添加到线程池");
     }
 }
