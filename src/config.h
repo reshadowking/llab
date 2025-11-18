@@ -35,12 +35,5 @@ typedef enum {
 #define LOG_LEVEL 3                          // 日志级别: 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG
 #define LOG_FILE "webserver.log"             // 日志文件路径
 
-// 日志级别枚举
-typedef enum {
-    LOG_ERROR = 0,
-    LOG_WARN = 1,
-    LOG_INFO = 2,
-    LOG_DEBUG = 3
-} log_level_t;
 
 #endif

@@ -4,10 +4,9 @@
 #include <sys/epoll.h>
 #include "cache.h"
 #include "threadpool.h"
-#include "config.h"  // 包含配置头文件
+#include "config.h"
 
-// 使用config.h中的定义，不再重复定义
-// #define MAX_EVENTS 1024  // 移动到config.h
+#define MAX_EVENTS 1024
 
 typedef struct {
     int epoll_fd;
@@ -18,10 +17,10 @@ typedef struct {
     struct epoll_event *events;
 } epoll_handler_t;
 
+// 添加这些函数声明
 epoll_handler_t *epoll_handler_create(int server_fd, cache_t *cache, 
                                      const char *document_root, threadpool_t *pool);
 void epoll_handler_destroy(epoll_handler_t *handler);
-int epoll_handler_add_client(epoll_handler_t *handler, int client_fd);
 void epoll_handler_loop(epoll_handler_t *handler);
 
 #endif

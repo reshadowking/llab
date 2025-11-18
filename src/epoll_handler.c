@@ -15,6 +15,9 @@
 #include "cache.h"
 #include "logging.h"
 
+static void handle_new_connection(epoll_handler_t *handler);
+static void handle_client_data(epoll_handler_t *handler, int client_fd);
+
 epoll_handler_t *epoll_handler_create(int server_fd, cache_t *cache, 
                                      const char *document_root, threadpool_t *pool) {
     epoll_handler_t *handler = malloc(sizeof(epoll_handler_t));
@@ -120,6 +123,7 @@ static void handle_new_connection(epoll_handler_t *handler) {
 }
 
 static void handle_client_data(epoll_handler_t *handler, int client_fd) {
+
     // 创建客户端上下文
     client_context_t *ctx = malloc(sizeof(client_context_t));
     if (!ctx) {
@@ -143,4 +147,26 @@ static void handle_client_data(epoll_handler_t *handler, int client_fd) {
     } else {
         log_message(LOG_DEBUG, "客户端任务已添加到线程池");
     }
+}
+void epoll_handler_destroy(epoll_handler_t *handler) {
+    if (!handler) return;
+    
+    if (handler->events) {
+        free(handler->events);
+        handler->events = NULL;
+    }
+    
+    if (handler->document_root) {
+        free(handler->document_root);
+        handler->document_root = NULL;
+    }
+    
+    if (handler->epoll_fd >= 0) {
+        close(handler->epoll_fd);
+        handler->epoll_fd = -1;
+    }
+    
+    free(handler);
+    
+    log_message(LOG_INFO, "Epoll处理器已销毁");
 }
